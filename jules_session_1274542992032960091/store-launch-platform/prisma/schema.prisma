@@ -114,6 +114,17 @@ model Task {
   calendar_rule   String  @default("CALENDAR_DAYS")
   anchor          String? // e.g. "OPEN_DATE", "CONTRACT_SIGNED" - stored for re-baselining
   
+  // Milestone-Task Sync
+  milestone_type  String?  // e.g. "GRAND_OPEN", "SOFT_OPEN" - links this task to a milestone type
+  is_milestone    Boolean  @default(false) // Whether this task represents a milestone
+  milestone_id    String?  // Direct link to milestone for deterministic sync
+  
+  // Template tracking for overrides
+  source_type     String   @default("TEMPLATE") // "TEMPLATE" | "ADHOC"
+  template_task_id String?  // Reference to original template task
+  is_deleted      Boolean  @default(false)  // Soft delete for store tasks
+  is_overridden   Boolean  @default(false)  // True if dates/title manually changed
+  
   owner_id    String?
   owner       User?    @relation("TaskOwner", fields: [owner_id], references: [id])
   
@@ -266,10 +277,16 @@ model FXRate {
 
 model AuditLog {
   id          String   @id @default(uuid())
-  entity_type String
+  entity_type String   // 'TASK' | 'MILESTONE' | 'STORE' | 'TEMPLATE_TASK' | 'OVERRIDE'
   entity_id   String
-  action      String
-  changes     String // JSON string of changes
+  action      String   // 'CREATE' | 'UPDATE' | 'DELETE' | 'RESCHEDULE' | 'REBASE'
+  changes     String   // JSON string of changes
+  
+  // Snapshot data for history viewing
+  before_json String?  // JSON snapshot before change
+  after_json  String?  // JSON snapshot after change
+  reason      String?  // User-provided reason or policy type
+  metadata    String?  // Additional context (e.g., deltaDays, affectedTaskCount)
   
   user_id     String?
   user        User?    @relation(fields: [user_id], references: [id])
@@ -284,4 +301,26 @@ model NotificationLog {
   payload     String
   status      String   // "SENT", "FAILED"
   created_at  DateTime @default(now())
+}
+
+// Store Template Override - Per-store customization of template tasks
+model StoreTemplateOverride {
+  id                    String   @id @default(uuid())
+  store_id              String
+  template_task_id      String
+  
+  // Override fields (null = use default)
+  override_title        String?
+  override_anchor_event String?
+  override_offset_days  Int?
+  override_duration_days Int?
+  override_workday_rule String?
+  
+  // Store-specific "delete" (hide task for this store)
+  is_disabled           Boolean  @default(false)
+  
+  created_at            DateTime @default(now())
+  updated_at            DateTime @updatedAt
+  
+  @@unique([store_id, template_task_id])
 }

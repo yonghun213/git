@@ -1,6 +1,7 @@
 
 import { PrismaClient } from '../generated/client'
 import { addDays, subDays, isWeekend, addBusinessDays, differenceInCalendarDays } from 'date-fns'
+import { createAuditLog } from '../../lib/audit'
 
 const prisma = new PrismaClient()
 
@@ -18,11 +19,17 @@ export function calculateDate(baseDate: Date, offset: number, rule: string): Dat
 
 // --- Generator ---
 
-export async function generateStoreTimeline(storeId: string, templateId: string) {
+export async function generateStoreTimeline(storeId: string, templateId: string, userId?: string) {
   // 1. Fetch Store Anchors
   const milestones = await prisma.milestone.findMany({ where: { store_id: storeId } })
   const anchorMap = new Map<string, Date>()
   milestones.forEach(m => anchorMap.set(m.type, m.date))
+  
+  // Fetch store overrides
+  const overrides = await prisma.storeTemplateOverride.findMany({
+    where: { store_id: storeId }
+  })
+  const overrideMap = new Map(overrides.map(o => [o.template_task_id, o]))
   
   if (!anchorMap.has('OPEN_DATE')) {
     if (anchorMap.has('CONTRACT_SIGNED')) {
@@ -50,10 +57,25 @@ export async function generateStoreTimeline(storeId: string, templateId: string)
 
   for (const phase of templatePhases) {
     for (const tTask of phase.tasks) {
-      let anchorDate = anchorMap.get(tTask.anchor_event)
+      // Check for store-specific override
+      const override = overrideMap.get(tTask.id)
+      
+      // Skip if disabled for this store
+      if (override?.is_disabled) {
+        continue
+      }
+      
+      // Apply overrides if present
+      const effectiveTitle = override?.override_title || tTask.name
+      const effectiveAnchor = override?.override_anchor_event || tTask.anchor_event
+      const effectiveOffset = override?.override_offset_days ?? tTask.offset_days
+      const effectiveDuration = override?.override_duration_days ?? tTask.duration_days
+      const effectiveRule = override?.override_workday_rule || tTask.workday_rule
+      
+      let anchorDate = anchorMap.get(effectiveAnchor)
       
       if (!anchorDate) {
-        if (tTask.anchor_event === 'CONSTRUCTION_START') {
+        if (effectiveAnchor === 'CONSTRUCTION_START') {
              const open = anchorMap.get('OPEN_DATE')!
              anchorDate = subDays(open, 90)
         } else {
@@ -61,20 +83,44 @@ export async function generateStoreTimeline(storeId: string, templateId: string)
         }
       }
 
-      const startDate = calculateDate(anchorDate, tTask.offset_days, tTask.workday_rule)
-      const dueDate = calculateDate(startDate, tTask.duration_days, tTask.workday_rule)
+      const startDate = calculateDate(anchorDate, effectiveOffset, effectiveRule)
+      const dueDate = calculateDate(startDate, effectiveDuration, effectiveRule)
       
       const newTask = await prisma.task.create({
         data: {
             store_id: storeId,
-            title: tTask.name,
+            title: effectiveTitle,
             phase: phase.name,
             status: 'NOT_STARTED',
             start_date: startDate,
             due_date: dueDate,
-            calendar_rule: tTask.workday_rule,
-            anchor: tTask.anchor_event,
+            calendar_rule: effectiveRule,
+            anchor: effectiveAnchor,
             role: tTask.role_responsible,
+            source_type: 'TEMPLATE',
+            template_task_id: tTask.id,
+            is_milestone: tTask.is_milestone,
+            is_overridden: !!override,
+        }
+      })
+      
+      // Create audit log for task creation
+      await createAuditLog({
+        entityType: 'TASK',
+        entityId: newTask.id,
+        action: 'CREATE',
+        userId,
+        after: {
+          title: effectiveTitle,
+          start_date: startDate,
+          due_date: dueDate,
+          phase: phase.name
+        },
+        metadata: {
+          storeId,
+          templateId,
+          templateTaskId: tTask.id,
+          hasOverride: !!override
         }
       })
       
@@ -140,12 +186,15 @@ export async function rescheduleTask(
     taskId: string, 
     newStartDate: Date, 
     policy: 'ONLY_THIS' | 'SHIFT_DOWNSTREAM' | 'CUSTOM_SET',
-    customTaskIds: string[] = []
+    customTaskIds: string[] = [],
+    userId?: string,
+    reason?: string
 ) {
   const task = await prisma.task.findUnique({ where: { id: taskId } })
   if (!task || !task.start_date || !task.due_date) return
 
   const oldStart = new Date(task.start_date)
+  const oldDue = new Date(task.due_date)
   const deltaDays = differenceInCalendarDays(newStartDate, oldStart)
 
   if (deltaDays === 0) return
@@ -159,9 +208,37 @@ export async function rescheduleTask(
     data: {
       start_date: newStartDate,
       due_date: newDue,
-      manual_override: true
+      manual_override: true,
+      is_overridden: true
     }
   })
+  
+  // Create audit log for reschedule
+  await createAuditLog({
+    entityType: 'TASK',
+    entityId: taskId,
+    action: 'RESCHEDULE',
+    userId,
+    before: {
+      start_date: oldStart,
+      due_date: oldDue
+    },
+    after: {
+      start_date: newStartDate,
+      due_date: newDue
+    },
+    reason,
+    metadata: {
+      deltaDays,
+      policy,
+      affectedTaskCount: 1
+    }
+  })
+  
+  // Check if this is a milestone task and sync milestone
+  if (task.is_milestone && task.milestone_type) {
+    await syncTaskToMilestone(task, newStartDate, userId)
+  }
 
   let tasksToShift: string[] = []
 
@@ -178,53 +255,196 @@ export async function rescheduleTask(
       const t = await prisma.task.findUnique({ where: { id: tid } })
       if (!t || t.locked || !t.start_date || !t.due_date) continue 
       
-      const tStart = addDays(new Date(t.start_date), deltaDays)
-      const tDue = addDays(new Date(t.due_date), deltaDays)
+      const tOldStart = new Date(t.start_date)
+      const tOldDue = new Date(t.due_date)
+      const tStart = addDays(tOldStart, deltaDays)
+      const tDue = addDays(tOldDue, deltaDays)
       
       await prisma.task.update({
           where: { id: tid },
           data: { start_date: tStart, due_date: tDue }
       })
+      
+      // Audit log for downstream shifts
+      await createAuditLog({
+        entityType: 'TASK',
+        entityId: tid,
+        action: 'RESCHEDULE',
+        userId,
+        before: { start_date: tOldStart, due_date: tOldDue },
+        after: { start_date: tStart, due_date: tDue },
+        reason: `Shifted due to reschedule of task ${taskId}`,
+        metadata: { deltaDays, triggeredBy: taskId }
+      })
+  }
+}
+
+// --- Milestone-Task Sync ---
+
+async function syncTaskToMilestone(task: { id: string; store_id: string; milestone_type: string | null }, newDate: Date, userId?: string) {
+  if (!task.milestone_type) return
+  
+  // Find the corresponding milestone
+  const milestone = await prisma.milestone.findFirst({
+    where: {
+      store_id: task.store_id,
+      type: task.milestone_type
+    }
+  })
+  
+  if (milestone) {
+    const oldDate = new Date(milestone.date)
+    await prisma.milestone.update({
+      where: { id: milestone.id },
+      data: { date: newDate }
+    })
+    
+    await createAuditLog({
+      entityType: 'MILESTONE',
+      entityId: milestone.id,
+      action: 'UPDATE',
+      userId,
+      before: { date: oldDate },
+      after: { date: newDate },
+      reason: `Synced from milestone task update`
+    })
+  }
+}
+
+export async function syncMilestoneToTask(milestoneId: string, userId?: string) {
+  const milestone = await prisma.milestone.findUnique({ where: { id: milestoneId } })
+  if (!milestone) return
+  
+  // Find task linked to this milestone
+  const linkedTask = await prisma.task.findFirst({
+    where: {
+      store_id: milestone.store_id,
+      milestone_type: milestone.type,
+      is_milestone: true
+    }
+  })
+  
+  if (linkedTask && linkedTask.start_date) {
+    const oldStart = new Date(linkedTask.start_date)
+    const oldDue = linkedTask.due_date ? new Date(linkedTask.due_date) : oldStart
+    
+    await prisma.task.update({
+      where: { id: linkedTask.id },
+      data: {
+        start_date: milestone.date,
+        due_date: milestone.date
+      }
+    })
+    
+    await createAuditLog({
+      entityType: 'TASK',
+      entityId: linkedTask.id,
+      action: 'UPDATE',
+      userId,
+      before: { start_date: oldStart, due_date: oldDue },
+      after: { start_date: milestone.date, due_date: milestone.date },
+      reason: `Synced from milestone update`
+    })
   }
 }
 
 // --- Milestone Updates ---
 
-export async function updateMilestone(milestoneId: string, newDate: Date) {
+export async function updateMilestone(milestoneId: string, newDate: Date, userId?: string, options?: {
+  syncMode?: 'UPDATE_MILESTONE_ONLY' | 'UPDATE_MILESTONE_AND_REBASE' | 'UPDATE_TASK_ONLY'
+}) {
     const ms = await prisma.milestone.findUnique({ where: { id: milestoneId } })
     if (!ms) return
     
+    const oldDate = new Date(ms.date)
+    const deltaDays = differenceInCalendarDays(newDate, oldDate)
+    
+    if (deltaDays === 0) return
+    
+    const syncMode = options?.syncMode || 'UPDATE_MILESTONE_AND_REBASE'
+    
+    // Update milestone
     await prisma.milestone.update({ where: { id: milestoneId }, data: { date: newDate } })
     
-    const deltaDays = differenceInCalendarDays(newDate, new Date(ms.date))
-    if (deltaDays === 0) return
+    // Audit log for milestone update
+    await createAuditLog({
+      entityType: 'MILESTONE',
+      entityId: milestoneId,
+      action: 'UPDATE',
+      userId,
+      before: { date: oldDate },
+      after: { date: newDate },
+      metadata: { deltaDays, syncMode }
+    })
+    
+    // Sync linked milestone task
+    await syncMilestoneToTask(milestoneId, userId)
+    
+    if (syncMode === 'UPDATE_MILESTONE_ONLY') {
+      return
+    }
 
     const anchoredTasks = await prisma.task.findMany({
-        where: { store_id: ms.store_id, anchor: ms.type, locked: false }
+        where: { store_id: ms.store_id, anchor: ms.type, locked: false, manual_override: false }
     })
+    
+    let affectedCount = 0
     
     for (const t of anchoredTasks) {
         if (!t.start_date || !t.due_date) continue
-        const tStart = addDays(new Date(t.start_date), deltaDays)
-        const tDue = addDays(new Date(t.due_date), deltaDays)
+        const tOldStart = new Date(t.start_date)
+        const tOldDue = new Date(t.due_date)
+        const tStart = addDays(tOldStart, deltaDays)
+        const tDue = addDays(tOldDue, deltaDays)
         
         await prisma.task.update({
             where: { id: t.id },
             data: { start_date: tStart, due_date: tDue }
         })
         
+        await createAuditLog({
+          entityType: 'TASK',
+          entityId: t.id,
+          action: 'REBASE',
+          userId,
+          before: { start_date: tOldStart, due_date: tOldDue },
+          after: { start_date: tStart, due_date: tDue },
+          reason: `Rebased from milestone ${ms.type} update`,
+          metadata: { milestoneId, deltaDays }
+        })
+        
+        affectedCount++
+        
         const descendants = await getDescendants(t.id)
         for (const descId of descendants) {
              const dt = await prisma.task.findUnique({ where: { id: descId } })
-             if (dt && !dt.locked && !dt.anchor && dt.start_date && dt.due_date) {
+             if (dt && !dt.locked && !dt.anchor && !dt.manual_override && dt.start_date && dt.due_date) {
+                 const dtOldStart = new Date(dt.start_date)
+                 const dtOldDue = new Date(dt.due_date)
+                 
                  await prisma.task.update({
                      where: { id: descId },
                      data: {
-                         start_date: addDays(new Date(dt.start_date), deltaDays),
-                         due_date: addDays(new Date(dt.due_date), deltaDays)
+                         start_date: addDays(dtOldStart, deltaDays),
+                         due_date: addDays(dtOldDue, deltaDays)
                      }
                  })
+                 
+                 await createAuditLog({
+                   entityType: 'TASK',
+                   entityId: descId,
+                   action: 'REBASE',
+                   userId,
+                   before: { start_date: dtOldStart, due_date: dtOldDue },
+                   after: { start_date: addDays(dtOldStart, deltaDays), due_date: addDays(dtOldDue, deltaDays) },
+                   reason: `Rebased as downstream of milestone ${ms.type} update`,
+                   metadata: { milestoneId, deltaDays }
+                 })
+                 
+                 affectedCount++
              }
         }
     }
+    
+    return { affectedCount, deltaDays }
 }
