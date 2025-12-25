@@ -3,24 +3,9 @@ import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { PrismaClient } from '@/src/generated/client'
 import bcrypt from 'bcryptjs'
+import { parseSession } from '@/lib/session'
 
 const prisma = new PrismaClient()
-
-interface SessionData {
-  userId: string
-  email: string
-  role: string
-  name: string | null
-}
-
-function parseSession(sessionCookie: string): SessionData | null {
-  try {
-    const decoded = Buffer.from(sessionCookie, 'base64').toString('utf-8')
-    return JSON.parse(decoded)
-  } catch {
-    return null
-  }
-}
 
 export default async function AdminPage() {
   const cookieStore = await cookies()
