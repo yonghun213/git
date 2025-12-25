@@ -1,18 +1,44 @@
 
 'use client'
 
+import { useMemo } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Input } from './ui/Input'
 
-export default function ViewControls({ phases }: { phases: string[] }) {
+interface Store {
+  id: string
+  name: string
+  country: string
+}
+
+interface ViewControlsProps {
+  phases: string[]
+  stores?: Store[]  // Optional: for cross-store filtering
+  showStoreFilters?: boolean  // Whether to show country/store filters
+}
+
+export default function ViewControls({ phases, stores = [], showStoreFilters = false }: ViewControlsProps) {
   const router = useRouter()
   const searchParams = useSearchParams()
   
   const mode = searchParams.get('mode') || 'ALL'
   const filterPhase = searchParams.get('phase') || ''
   const filterStatus = searchParams.get('status') || ''
-  const filterRole = searchParams.get('role') || ''
+  const filterCountry = searchParams.get('country') || ''
+  const filterStoreId = searchParams.get('storeId') || ''
   const search = searchParams.get('q') || ''
+
+  // Derive unique countries from stores
+  const countries = useMemo(() => {
+    const countrySet = new Set(stores.map(s => s.country))
+    return Array.from(countrySet).sort()
+  }, [stores])
+
+  // Filter stores by selected country
+  const filteredStores = useMemo(() => {
+    if (!filterCountry) return stores
+    return stores.filter(s => s.country === filterCountry)
+  }, [stores, filterCountry])
 
   const updateParam = (key: string, value: string) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -21,6 +47,12 @@ export default function ViewControls({ phases }: { phases: string[] }) {
     } else {
       params.delete(key)
     }
+    
+    // Clear storeId if country changes
+    if (key === 'country') {
+      params.delete('storeId')
+    }
+    
     router.push(`?${params.toString()}`)
   }
 
@@ -45,6 +77,31 @@ export default function ViewControls({ phases }: { phases: string[] }) {
 
         <div className="h-6 w-px bg-slate-200 hidden md:block"></div>
 
+        {/* Country/Store Filters (when enabled) */}
+        {showStoreFilters && stores.length > 0 && (
+          <>
+            <select 
+              value={filterCountry} 
+              onChange={(e) => updateParam('country', e.target.value)}
+              className="text-sm border-slate-300 rounded-md shadow-sm focus:border-orange-500 focus:ring-orange-500 border p-2 bg-white"
+            >
+              <option value="">All Countries</option>
+              {countries.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+
+            <select 
+              value={filterStoreId} 
+              onChange={(e) => updateParam('storeId', e.target.value)}
+              className="text-sm border-slate-300 rounded-md shadow-sm focus:border-orange-500 focus:ring-orange-500 border p-2 bg-white"
+            >
+              <option value="">All Stores</option>
+              {filteredStores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+
+            <div className="h-6 w-px bg-slate-200 hidden md:block"></div>
+          </>
+        )}
+
         {/* Phase Filter */}
         <select 
           value={filterPhase} 
@@ -65,23 +122,6 @@ export default function ViewControls({ phases }: { phases: string[] }) {
           <option value="NOT_STARTED">Not Started</option>
           <option value="IN_PROGRESS">In Progress</option>
           <option value="DONE">Done</option>
-        </select>
-
-        {/* Role Filter (Simple Text Input for now or Predefined list?) */}
-        {/* Let's use a select with common roles + input fallback if needed, but for MVP keep it simple select if possible.
-            Since I don't have roles list passed in, I'll use a hardcoded list of standard roles for now.
-        */}
-        <select 
-          value={filterRole} 
-          onChange={(e) => updateParam('role', e.target.value)}
-          className="text-sm border-slate-300 rounded-md shadow-sm focus:border-orange-500 focus:ring-orange-500 border p-2 bg-white"
-        >
-          <option value="">All Roles</option>
-          <option value="PM">Project Manager</option>
-          <option value="CONSTRUCTION">Construction</option>
-          <option value="IT">IT / Systems</option>
-          <option value="OPERATIONS">Operations</option>
-          <option value="MARKETING">Marketing</option>
         </select>
 
         <div className="flex-grow"></div>
