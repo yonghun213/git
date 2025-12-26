@@ -3,10 +3,11 @@
 A collaborative, multi-country platform for managing store openings in Latin America.
 
 ## Architecture
-- **Framework:** Next.js 15 (App Router)
-- **Database:** SQLite (MVP) with Prisma ORM (v5)
+- **Framework:** Next.js 16.1.1 (App Router)
+- **Database:** SQLite (local dev) / Supabase Postgres (production)
+- **ORM:** Prisma v5
 - **Language:** TypeScript
-- **Styling:** Tailwind CSS
+- **Styling:** Tailwind CSS v4
 
 ## Features (MVP Status)
 - **Data Layer:** Complete schema for Users, Stores, Tasks, Templates, and Costing/Pricing.
@@ -17,28 +18,65 @@ A collaborative, multi-country platform for managing store openings in Latin Ame
   - Recipes & Competitor Benchmarks.
 - **Auth:** Simulated "Dev Mode" login (cookie-based).
 - **Dashboard:** Portfolio overview of active store launches.
+- **Task Management:** 55 tasks across 8 launch phases with timeline/calendar views.
+- **Documentation:** Complete Korean user manual with 100% UI coverage.
 
-## Setup & Run
+## Quick Start (Local Development)
 
-1. **Install Dependencies**
+1. **Clone & Install**
    ```bash
    npm install
    ```
 
-2. **Initialize Database**
+2. **Set Up Environment**
+   ```bash
+   cp .env.example .env.local
+   # Edit .env.local if needed (defaults work for local dev)
+   ```
+
+3. **Initialize Database**
    ```bash
    # Run migrations
-   npx prisma migrate dev --name init
+   npx prisma migrate dev
 
-   # Seed data
+   # Seed sample data
    npx tsx prisma/seed.ts
    ```
 
-3. **Run Development Server**
+4. **Run Development Server**
    ```bash
    npm run dev
    ```
    Open [http://localhost:3000](http://localhost:3000).
+
+## Deploy to Vercel (FREE Tier)
+
+**Complete step-by-step guide:** [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md)
+
+**Quick summary:**
+1. Sign up for free accounts: [Vercel](https://vercel.com) + [Supabase](https://supabase.com)
+2. Create Supabase project, copy DATABASE_URL
+3. Generate NEXTAUTH_SECRET: `openssl rand -base64 32`
+4. Import repo to Vercel, set environment variables (see [.env.example](./.env.example))
+5. Deploy → Update NEXTAUTH_URL → Redeploy
+6. Run migrations: `npx prisma migrate deploy`
+7. Seed database: `npx tsx prisma/seed.ts`
+
+**No credit card required!** Works entirely on free tiers.
+
+## Environment Variables
+
+See [.env.example](./.env.example) for all required and optional variables.
+
+**Required for production:**
+- `DATABASE_URL` - Supabase Postgres connection string
+- `NEXTAUTH_URL` - Your deployment URL
+- `NEXTAUTH_SECRET` - Random secret for session encryption
+
+**Optional (for file uploads):**
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_KEY`
 
 ## Operator Runbook (Short)
 
